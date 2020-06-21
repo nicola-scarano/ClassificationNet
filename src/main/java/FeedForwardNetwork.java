@@ -12,6 +12,13 @@ import org.datavec.api.writable.Writable;
 import org.datavec.local.transforms.LocalTransformExecutor;
 import org.deeplearning4j.core.storage.StatsStorage;
 import org.deeplearning4j.datasets.datavec.RecordReaderDataSetIterator;
+import org.deeplearning4j.earlystopping.EarlyStoppingConfiguration;
+import org.deeplearning4j.earlystopping.EarlyStoppingResult;
+import org.deeplearning4j.earlystopping.saver.LocalFileModelSaver;
+import org.deeplearning4j.earlystopping.scorecalc.DataSetLossCalculator;
+import org.deeplearning4j.earlystopping.termination.MaxEpochsTerminationCondition;
+import org.deeplearning4j.earlystopping.termination.MaxTimeIterationTerminationCondition;
+import org.deeplearning4j.earlystopping.trainer.EarlyStoppingTrainer;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
@@ -28,6 +35,7 @@ import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.dataset.DataSet;
 import org.nd4j.linalg.dataset.api.iterator.DataSetIterator;
+import org.nd4j.linalg.dataset.api.iterator.KFoldIterator;
 import org.nd4j.linalg.dataset.api.preprocessor.NormalizerMinMaxScaler;
 import org.nd4j.linalg.learning.config.Nesterovs;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
@@ -38,6 +46,8 @@ import java.io.File;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 //http://localhost:9000/train   for visualization
 
@@ -58,8 +68,14 @@ public class FeedForwardNetwork {
 
 
 
-        //--------------  definizione dello schema  ---------------------
 
+        //=========================================================================================
+        //                 Step 1: Data preparation
+        //=========================================================================================
+
+
+
+        //--------------  definizione dello schema  ---------------------
 
         Schema schema = new Schema.Builder()
                 .addColumnsInteger("myIntegerCol_%d",0,9)
@@ -74,7 +90,7 @@ public class FeedForwardNetwork {
 
 
 
-        //--------------  definizione operazioni da fare  ---------------------
+        //--------------  definizione trasformazioni da eseguire sul dataset  ---------------------
 
         TransformProcess tp = new TransformProcess.Builder(schema)
                 .categoricalToInteger("target")
@@ -89,7 +105,8 @@ public class FeedForwardNetwork {
 
 
 
-        //---------------  caricamento dati e esecuzione delle operazioni  -----------------
+
+        //---------------  caricamento dati e esecuzione delle trasformazioni  -----------------
 
         //Define input and output paths:
         File inputTraining = new File("/Classification/ClassificationNet/Training.csv");
@@ -107,10 +124,7 @@ public class FeedForwardNetwork {
         }
         outputTest.createNewFile();
 
-
-
         //Define input reader and output writer:
-
         //TRAINING SET
         RecordReader rrTg = new CSVRecordReader(1, ';');
         rrTg.initialize(new FileSplit(inputTraining));
@@ -126,8 +140,6 @@ public class FeedForwardNetwork {
         RecordWriter rwTs = new CSVRecordWriter();
         Partitioner p1 = new NumberOfRecordsPartitioner();
         rwTs.initialize(new FileSplit(outputTest), p1);
-
-
 
 
         //Process the data:
@@ -162,10 +174,12 @@ public class FeedForwardNetwork {
 
 
         //---------------      NORMALIZZAZIONE DEI DATI     -----------------------
+
         RecordReader rrTraining = new CSVRecordReader(0, ',');
         rrTraining.initialize(new FileSplit(outputTraining));
         DataSetIterator trainingIter = new RecordReaderDataSetIterator(rrTraining,batchSize,9,2);
         DataSet training = trainingIter.next();
+        KFoldIterator KFtrainingIter = new KFoldIterator(10,training);   //CROSS validation iterator
 
         RecordReader rrTest = new CSVRecordReader(0, ',');
         rrTest.initialize(new FileSplit(outputTest));
@@ -191,7 +205,11 @@ public class FeedForwardNetwork {
 
 
 
-        //---------------------   NEURAL NETWORK CONFIGURATION   ----------------------
+
+
+        //=================================================================================================
+        //                 Step 2: Neural network configuration, training and evaluation
+        //=================================================================================================
 
         MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder()
                 .seed(seed)
@@ -207,27 +225,39 @@ public class FeedForwardNetwork {
                         .nIn(numHiddenNodes).nOut(numOutputs).build())
                 .build();
 
-        MultiLayerNetwork model = new MultiLayerNetwork(conf);
+
+        /*
+         *                           TRAINING CON EARLY STOPPING
+         * */
+        EarlyStoppingConfiguration esConf = new EarlyStoppingConfiguration.Builder()
+                .epochTerminationConditions(new MaxEpochsTerminationCondition(50))
+                .iterationTerminationConditions(new MaxTimeIterationTerminationCondition(20, TimeUnit.MINUTES))
+                .scoreCalculator(new DataSetLossCalculator(testIter, true))
+                .evaluateEveryNEpochs(1)
+                .modelSaver(new LocalFileModelSaver("/bestmodel"))
+                .build();
+
+        EarlyStoppingTrainer trainer = new EarlyStoppingTrainer(esConf,conf,KFtrainingIter);
+
+        //Conduct early stopping training:
+        EarlyStoppingResult <MultiLayerNetwork> result = trainer.fit();
+
+        MultiLayerNetwork model = result.getBestModel();
         model.init();
         model.setListeners(new ScoreIterationListener(10));
 
-
-        //Initialize the user interface backend
-        UIServer uiServer = UIServer.getInstance();
-
-        //Configure where the network information (gradients, activations, score vs. time etc) is to be stored
-        //Then add the StatsListener to collect this information from the network, as it trains
-        StatsStorage statsStorage = new FileStatsStorage(new File(System.getProperty("java.io.tmpdir"), "ui-stats.dl4j"));
-        int listenerFrequency = 1;
-        model.setListeners(new StatsListener(statsStorage, listenerFrequency));
-
-        //Attach the StatsStorage instance to the UI: this allows the contents of the StatsStorage to be visualized
-        uiServer.attach(statsStorage);
+        //Print out the results:
+        System.out.println("Termination reason: " + result.getTerminationReason());
+        System.out.println("Termination details: " + result.getTerminationDetails());
+        System.out.println("Total epochs: " + result.getTotalEpochs());
+        System.out.println("Best epoch number: " + result.getBestModelEpoch());
+        System.out.println("Score at best epoch: " + result.getBestModelScore());
+        System.out.println("EPOCA : SCORE");
+        Map<Integer,Double> scoreVsIter = result.getScoreVsEpoch();
+        scoreVsIter.forEach((key, value) -> System.out.println(key + ":" + value));
 
 
-        model.fit( trainingIter, nEpochs );
-
-
+        //evaluation
         System.out.println("Evaluate model....");
         Evaluation eval = new Evaluation(numOutputs);
         while(testIter.hasNext()){
@@ -236,13 +266,13 @@ public class FeedForwardNetwork {
             INDArray lables = t.getLabels();
             INDArray predicted = model.output(features,false);
             eval.eval(lables, predicted);
-
         }
 
-        //Print the evaluation statistics
         System.out.println(eval.stats());
 
-
     }
+
+
+
 
 }
