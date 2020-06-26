@@ -22,6 +22,7 @@ import org.deeplearning4j.earlystopping.trainer.EarlyStoppingTrainer;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
+import org.deeplearning4j.nn.conf.Updater;
 import org.deeplearning4j.nn.conf.layers.DenseLayer;
 import org.deeplearning4j.nn.conf.layers.OutputLayer;
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
@@ -42,8 +43,13 @@ import org.nd4j.linalg.dataset.api.iterator.SamplingDataSetIterator;
 import org.nd4j.linalg.dataset.api.iterator.TestDataSetIterator;
 import org.nd4j.linalg.dataset.api.preprocessor.NormalizerMinMaxScaler;
 import org.nd4j.linalg.factory.Nd4j;
+import org.nd4j.linalg.learning.config.AdaGrad;
+import org.nd4j.linalg.learning.config.Adam;
 import org.nd4j.linalg.learning.config.Nesterovs;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
+import org.nd4j.linalg.schedule.CycleSchedule;
+import org.nd4j.linalg.schedule.ExponentialSchedule;
+import org.nd4j.linalg.schedule.ScheduleType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,13 +70,13 @@ public class FeedForwardNetwork {
     public static void main(String[] args) throws Exception {
 
         int seed = 123;
-        double learningRate = 0.1;
+        double learningRate = 0.0001;
         int batchSize = 50;
-        int k=7;
+        int k=10;
 
         int numInputs = 9;
         int numOutputs = 2;
-        int numHiddenNodes = 40;
+        int numHiddenNodes = 500;
 
 
 
@@ -84,8 +90,8 @@ public class FeedForwardNetwork {
         //--------------  definizione dello schema  ---------------------
 
         Schema schema = new Schema.Builder()
-                .addColumnsInteger("myIntegerCol_%d",0,9)
-                .addColumnCategorical("target", "2", "4")
+                .addColumnsDouble("DoubleCol_%d",0,8)
+                .addColumnCategorical("target", "1", "2")
                 .build();
 
         System.out.println("\n\nOther information obtainable from schema:");
@@ -100,12 +106,10 @@ public class FeedForwardNetwork {
 
         TransformProcess tp = new TransformProcess.Builder(schema)
                 .categoricalToInteger("target")
-                .removeColumns("myIntegerCol_0")
                 .build();
 
         //After executing all of these operations, we have a new and different schema:
         Schema outputSchema = tp.getFinalSchema();
-
         System.out.println("\n\n\nSchema after transforming data:");
         System.out.println(outputSchema);
 
@@ -115,10 +119,10 @@ public class FeedForwardNetwork {
         //---------------  caricamento dati e esecuzione delle trasformazioni  -----------------
 
         //Define input and output paths:
-        File inputTraining = new File("/Classification/ClassificationNet/Training.csv");
-        File outputTraining = new File("/Classification/ClassificationNet/TrainingClean.csv");
-        File inputTest = new File("/Classification/ClassificationNet/Test.csv");
-        File outputTest = new File("/Classification/ClassificationNet/TestClean.csv");
+        File inputTraining = new File("/Classification/ClassificationNet/DataTraining.csv");
+        File outputTraining = new File("/Classification/ClassificationNet/DataTrainingClean.csv");
+        File inputTest = new File("/Classification/ClassificationNet/DataTest.csv");
+        File outputTest = new File("/Classification/ClassificationNet/DataTestClean.csv");
 
         if(outputTraining.exists()){
             outputTraining.delete();
@@ -132,7 +136,7 @@ public class FeedForwardNetwork {
 
         //Define input reader and output writer:
         //TRAINING SET
-        RecordReader rrTg = new CSVRecordReader(1, ';');
+        RecordReader rrTg = new CSVRecordReader(1, ',');
         rrTg.initialize(new FileSplit(inputTraining));
 
         RecordWriter rwTg = new CSVRecordWriter();
@@ -140,7 +144,7 @@ public class FeedForwardNetwork {
         rwTg.initialize(new FileSplit(outputTraining), p);
 
         //TEST SET
-        RecordReader rrTs = new CSVRecordReader(1, ';');
+        RecordReader rrTs = new CSVRecordReader(1, ',');
         rrTs.initialize(new FileSplit(inputTest));
 
         RecordWriter rwTs = new CSVRecordWriter();
@@ -192,18 +196,18 @@ public class FeedForwardNetwork {
         DataSetIterator testIter = new RecordReaderDataSetIterator(rrTest,1,9,2);
         DataSet test = testIter.next();
 
-        NormalizerMinMaxScaler preProcessor = new NormalizerMinMaxScaler(0,1);
-        preProcessor.fit(training);
+        NormalizerMinMaxScaler preProcessor1 = new NormalizerMinMaxScaler(0,1);
+        preProcessor1.fit(training);
 
         log.info("First ten Training set before normalization");
         log.info("\n{}",training.getRange(0,9));
-        preProcessor.transform(training);
+        preProcessor1.transform(training);
         log.info("First ten Training set after normalization");
         log.info("\n{}",training.getRange(0,9));
 
         log.info("First Test set before normalization");
         log.info("\n{}",test.getRange(0,1));
-        preProcessor.transform(test);
+        preProcessor1.transform(test);
         log.info("First Test set after normalization");
         log.info("\n{}",test.getRange(0,1));
 
@@ -221,7 +225,7 @@ public class FeedForwardNetwork {
                 .seed(seed)
                 .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
                 .weightInit(WeightInit.XAVIER)
-                .updater(new Nesterovs(learningRate, 0.9))
+                .updater(new AdaGrad(learningRate))
                 .list()
                 .layer(new DenseLayer.Builder().nIn(numInputs).nOut(numHiddenNodes)
                         .activation(Activation.RELU)
@@ -229,8 +233,8 @@ public class FeedForwardNetwork {
                 .layer(new DenseLayer.Builder().nIn(numHiddenNodes).nOut(numHiddenNodes)
                         .activation(Activation.RELU)
                         .build())
-                .layer(new OutputLayer.Builder(LossFunctions.LossFunction.NEGATIVELOGLIKELIHOOD)//XENT loss function used for binary classification
-                        .activation(Activation.SOFTMAX)
+                .layer(new OutputLayer.Builder(LossFunctions.LossFunction.XENT)//XENT loss function used for binary classification
+                        .activation(Activation.SIGMOID)
                         .nIn(numHiddenNodes).nOut(numOutputs).build())
                 .build();
 
@@ -245,7 +249,7 @@ public class FeedForwardNetwork {
             DataSet tedataset = KFtrainingIter.testFold();
 
             EarlyStoppingConfiguration esConf = new EarlyStoppingConfiguration.Builder()
-                    .epochTerminationConditions(new MaxEpochsTerminationCondition(500))
+                    .epochTerminationConditions(new MaxEpochsTerminationCondition(1000))
                     .iterationTerminationConditions(new MaxTimeIterationTerminationCondition(20, TimeUnit.MINUTES))
                     .scoreCalculator(new DataSetLossCalculator(new TestDataSetIterator(tedataset), true))
                     .evaluateEveryNEpochs(1)
