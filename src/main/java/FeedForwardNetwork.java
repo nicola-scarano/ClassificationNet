@@ -245,7 +245,7 @@ public class FeedForwardNetwork {
             DataSet tedataset = KFtrainingIter.testFold();
 
             EarlyStoppingConfiguration esConf = new EarlyStoppingConfiguration.Builder()
-                    .epochTerminationConditions(new MaxEpochsTerminationCondition(50))
+                    .epochTerminationConditions(new MaxEpochsTerminationCondition(500))
                     .iterationTerminationConditions(new MaxTimeIterationTerminationCondition(20, TimeUnit.MINUTES))
                     .scoreCalculator(new DataSetLossCalculator(new TestDataSetIterator(tedataset), true))
                     .evaluateEveryNEpochs(1)
