@@ -32,16 +32,22 @@ import org.deeplearning4j.ui.model.stats.StatsListener;
 import org.deeplearning4j.ui.model.storage.FileStatsStorage;
 import org.nd4j.evaluation.classification.Evaluation;
 import org.nd4j.linalg.activations.Activation;
+import org.nd4j.linalg.api.buffer.DataType;
 import org.nd4j.linalg.api.ndarray.INDArray;
+import org.nd4j.linalg.api.ops.ScalarOp;
 import org.nd4j.linalg.dataset.DataSet;
 import org.nd4j.linalg.dataset.api.iterator.DataSetIterator;
 import org.nd4j.linalg.dataset.api.iterator.KFoldIterator;
+import org.nd4j.linalg.dataset.api.iterator.SamplingDataSetIterator;
+import org.nd4j.linalg.dataset.api.iterator.TestDataSetIterator;
 import org.nd4j.linalg.dataset.api.preprocessor.NormalizerMinMaxScaler;
+import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.learning.config.Nesterovs;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.swing.*;
 import java.io.File;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
@@ -60,11 +66,11 @@ public class FeedForwardNetwork {
         int seed = 123;
         double learningRate = 0.1;
         int batchSize = 50;
-        int nEpochs = 30;
+        int k=7;
 
         int numInputs = 9;
         int numOutputs = 2;
-        int numHiddenNodes = 15;
+        int numHiddenNodes = 40;
 
 
 
@@ -179,11 +185,11 @@ public class FeedForwardNetwork {
         rrTraining.initialize(new FileSplit(outputTraining));
         DataSetIterator trainingIter = new RecordReaderDataSetIterator(rrTraining,batchSize,9,2);
         DataSet training = trainingIter.next();
-        KFoldIterator KFtrainingIter = new KFoldIterator(10,training);   //CROSS validation iterator
+        KFoldIterator KFtrainingIter = new KFoldIterator(k,training);   //CROSS validation iterator
 
         RecordReader rrTest = new CSVRecordReader(0, ',');
         rrTest.initialize(new FileSplit(outputTest));
-        DataSetIterator testIter = new RecordReaderDataSetIterator(rrTest,batchSize,9,2);
+        DataSetIterator testIter = new RecordReaderDataSetIterator(rrTest,1,9,2);
         DataSet test = testIter.next();
 
         NormalizerMinMaxScaler preProcessor = new NormalizerMinMaxScaler(0,1);
@@ -195,11 +201,11 @@ public class FeedForwardNetwork {
         log.info("First ten Training set after normalization");
         log.info("\n{}",training.getRange(0,9));
 
-        log.info("First ten Test set before normalization");
-        log.info("\n{}",test.getRange(0,9));
+        log.info("First Test set before normalization");
+        log.info("\n{}",test.getRange(0,1));
         preProcessor.transform(test);
-        log.info("First ten Test set after normalization");
-        log.info("\n{}",test.getRange(0,9));
+        log.info("First Test set after normalization");
+        log.info("\n{}",test.getRange(0,1));
 
 
 
@@ -220,41 +226,53 @@ public class FeedForwardNetwork {
                 .layer(new DenseLayer.Builder().nIn(numInputs).nOut(numHiddenNodes)
                         .activation(Activation.RELU)
                         .build())
+                .layer(new DenseLayer.Builder().nIn(numHiddenNodes).nOut(numHiddenNodes)
+                        .activation(Activation.RELU)
+                        .build())
                 .layer(new OutputLayer.Builder(LossFunctions.LossFunction.NEGATIVELOGLIKELIHOOD)//XENT loss function used for binary classification
                         .activation(Activation.SOFTMAX)
                         .nIn(numHiddenNodes).nOut(numOutputs).build())
                 .build();
 
 
-        /*
-         *                           TRAINING CON EARLY STOPPING
-         * */
-        EarlyStoppingConfiguration esConf = new EarlyStoppingConfiguration.Builder()
-                .epochTerminationConditions(new MaxEpochsTerminationCondition(50))
-                .iterationTerminationConditions(new MaxTimeIterationTerminationCondition(20, TimeUnit.MINUTES))
-                .scoreCalculator(new DataSetLossCalculator(testIter, true))
-                .evaluateEveryNEpochs(1)
-                .modelSaver(new LocalFileModelSaver("/bestmodel"))
-                .build();
 
-        EarlyStoppingTrainer trainer = new EarlyStoppingTrainer(esConf,conf,KFtrainingIter);
 
-        //Conduct early stopping training:
-        EarlyStoppingResult <MultiLayerNetwork> result = trainer.fit();
 
-        MultiLayerNetwork model = result.getBestModel();
-        model.init();
-        model.setListeners(new ScoreIterationListener(10));
+        batchSize = 5000; // Grande in maniera tale che ogni epoca di addestramento corrisponda ad un batch
+        ArrayList<MultiLayerNetwork> models = new ArrayList<>();
+        while (KFtrainingIter.hasNext()) {
+            DataSet trdataset = KFtrainingIter.next();
+            DataSet tedataset = KFtrainingIter.testFold();
 
-        //Print out the results:
-        System.out.println("Termination reason: " + result.getTerminationReason());
-        System.out.println("Termination details: " + result.getTerminationDetails());
-        System.out.println("Total epochs: " + result.getTotalEpochs());
-        System.out.println("Best epoch number: " + result.getBestModelEpoch());
-        System.out.println("Score at best epoch: " + result.getBestModelScore());
-        System.out.println("EPOCA : SCORE");
-        Map<Integer,Double> scoreVsIter = result.getScoreVsEpoch();
-        scoreVsIter.forEach((key, value) -> System.out.println(key + ":" + value));
+            EarlyStoppingConfiguration esConf = new EarlyStoppingConfiguration.Builder()
+                    .epochTerminationConditions(new MaxEpochsTerminationCondition(50))
+                    .iterationTerminationConditions(new MaxTimeIterationTerminationCondition(20, TimeUnit.MINUTES))
+                    .scoreCalculator(new DataSetLossCalculator(new TestDataSetIterator(tedataset), true))
+                    .evaluateEveryNEpochs(1)
+                    .modelSaver(new LocalFileModelSaver("/bestmodel"))
+                    .build();
+            EarlyStoppingTrainer trainer = new EarlyStoppingTrainer(esConf,conf, new SamplingDataSetIterator(trdataset, batchSize, trdataset.getLabels().rows()));
+
+            //Conduct early stopping training:
+            EarlyStoppingResult <MultiLayerNetwork> result = trainer.fit();
+
+            MultiLayerNetwork model = result.getBestModel();
+
+            //Print out the results:
+            System.out.println("Termination reason: " + result.getTerminationReason());
+            System.out.println("Termination details: " + result.getTerminationDetails());
+            System.out.println("Total epochs: " + result.getTotalEpochs());
+            System.out.println("Best epoch number: " + result.getBestModelEpoch());
+            System.out.println("Score at best epoch: " + result.getBestModelScore());
+            System.out.println("EPOCA : SCORE");
+            Map<Integer,Double> scoreVsIter = result.getScoreVsEpoch();
+            scoreVsIter.forEach((key, value) -> System.out.println(key + ":" + value));
+
+            models.add(model.clone());
+        }
+
+
+
 
 
         //evaluation
@@ -264,7 +282,18 @@ public class FeedForwardNetwork {
             DataSet t = testIter.next();
             INDArray features = t.getFeatures();
             INDArray lables = t.getLabels();
-            INDArray predicted = model.output(features,false);
+            System.out.println("Valore esatto"+ lables);
+            INDArray predicted = Nd4j.zeros(1, 2);
+            int i=0;
+            while(i<models.size()){
+                System.out.println("Valore calcolato da modello: " + i + " = "+ models.get(i).output(features,false));
+                predicted = predicted.add(models.get(i).output(features,false).castTo(DataType.FLOAT));
+                System.out.println("sum " + predicted);
+                i++;
+            }
+            predicted= predicted.div(k);
+
+            System.out.println("Predizione: "+ predicted);
             eval.eval(lables, predicted);
         }
 
